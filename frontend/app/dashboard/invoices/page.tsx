@@ -66,6 +66,17 @@ export default function InvoicesPage() {
 
   if (loading) return <p>Loading invoices...</p>;
 
+  if (invoices.length === 0) {
+    return (
+      <RequireAuth>
+        <div className="container">
+          <h1 style={{ textAlign: "center", color: "var(--primary-color)" }}>Invoices</h1>
+          <p>No invoices uploaded yet.</p>
+        </div>
+      </RequireAuth>
+    );
+  }
+
   return (
     <RequireAuth>
       <div className="container">

@@ -32,21 +32,6 @@ export default function UploadPage() {
       return;
     }
 
-    // 2️⃣ Fetch business_id for user
-    const { data: businessUser, error } = await supabase
-      .from("business_users")
-      .select("business_id")
-      .eq("user_id", user.id)
-      .single();
-
-    if (error || !businessUser) {
-      console.error(error);
-      alert("Business not found");
-      setUploadStatuses(prev => ({ ...prev, [file.name]: "Failed" }));
-      return;
-    }
-
-    const businessId = businessUser.business_id;
 
     // 3️⃣ Prepare multipart form
     const formData = new FormData();
@@ -56,9 +41,6 @@ export default function UploadPage() {
     try {
       const res = await fetch(`${API_BASE}/api/upload`, {
         method: "POST",
-        headers: {
-          "x-business-id": businessId,
-        },
         body: formData,
       });
 
