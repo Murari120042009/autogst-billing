@@ -43,19 +43,26 @@ const upload = multer({
   },
 });
 
+import { uploadLimiter } from "../middleware/rateLimit";
+import { idempotency } from "../middleware/idempotency";
+
 const handleUpload = upload.array("files", 5);
 
-router.post("/", authenticateUser, (req, res, next) => {
-  handleUpload(req, res, (err) => {
-    if (err instanceof multer.MulterError) {
-      return res.status(400).json({ error: `Upload error: ${err.message}` });
-    } else if (err) {
-      return res.status(400).json({ error: err.message });
-    }
-    next();
-  });
-}, async (req, res) => {
-  const user = req.user!;
+router.post("/", 
+  authenticateUser, 
+  uploadLimiter, 
+  idempotency, 
+  (req, res, next) => {
+    handleUpload(req, res, (err) => {
+      if (err instanceof multer.MulterError) {
+        return res.status(400).json({ error: `Upload error: ${err.message}` });
+      } else if (err) {
+        return res.status(400).json({ error: err.message });
+      }
+      next();
+    });
+  }, async (req, res) => {
+    const user = req.user!;
   const { businessId } = user;
 
   if (!businessId) {

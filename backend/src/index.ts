@@ -35,8 +35,13 @@ app.use(
   })
 );
 
+import { apiLimiter } from "./middleware/rateLimit";
+
 // ✅ LOGGING
 app.use(requestLogger);
+
+// ✅ RATE LIMITING
+app.use(apiLimiter);
 
 // ✅ METRICS
 startQueueMetricsPoller(ocrQueue);

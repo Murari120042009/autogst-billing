@@ -30,114 +30,131 @@ logger.info("🚀 OCR WORKER BOOTING...");
 
 import { ocrJobDurationSeconds, ocrJobFailuresTotal } from "../utils/metrics";
 
+// ✅ HELPER: Check Current State (Idempotency)
+const checkJobStatus = async (jobId: string) => {
+  const { data, error } = await supabase
+    .from("invoice_ocr_jobs")
+    .select("status")
+    .eq("id", jobId)
+    .single();
+
+  if (error || !data) return null;
+  return data.status;
+};
+
+// ✅ HELPER: Update Status
+const updateJobStatus = async (jobId: string, status: string, errorMsg?: string) => {
+  const updatePayload: any = { status, updated_at: new Date() };
+  if (status === "PROCESSING") updatePayload.processed_at = new Date();
+  if (status === "COMPLETED") updatePayload.completed_at = new Date(); // ✅ Track completion time
+  if (status === "FAILED") updatePayload.error_message = errorMsg; // Persist error
+
+  const { error } = await supabase
+    .from("invoice_ocr_jobs")
+    .update(updatePayload)
+    .eq("id", jobId);
+
+  if (error) {
+    logger.error({ msg: "Failed to update job status", jobId, status, err: error });
+    // Don't throw here, as this is a side effect. The job might still succeed logic-wise.
+  }
+};
+
 const worker = new Worker<OcrJobData>(
   "ocr",
   async (job: Job<OcrJobData>) => {
     const { jobId, invoiceId, filePath, businessId, requestId } = job.data;
-    const endTimer = ocrJobDurationSeconds.startTimer(); // ⏱️ Start Timer
-
-    // Create context-aware logger for this job
-    const jobLogger = createChildLogger({ 
-      jobId, 
-      invoiceId, 
-      businessId, 
-      requestId, 
-      component: "ocr-worker" 
-    });
+    const endTimer = ocrJobDurationSeconds.startTimer(); 
     
-    jobLogger.info("📥 PROCESSING JOB");
+    const jobLogger = createChildLogger({ 
+      jobId, invoiceId, businessId, requestId, component: "ocr-worker" 
+    });
+
+    jobLogger.info(`📥 JOB RECEIVED (Attempt ${job.attemptsMade + 1})`);
 
     try {
-      // 1️⃣ UPDATE STATUS: PROCESSING
-      await supabase
-        .from("invoice_ocr_jobs")
-        .update({ status: "PROCESSING", processed_at: new Date() })
-        .eq("id", jobId);
+      // 1️⃣ IDEMPOTENCY CHECK
+      // If retrying, check if we already finished it to avoid duplicate invoice versions
+      const currentStatus = await checkJobStatus(jobId);
+      if (currentStatus === "COMPLETED") {
+        jobLogger.warn("Job already COMPLETED. Skipping processing.");
+        return;
+      }
 
-      // ... existing code ...
+      // 2️⃣ MARK PROCESSING
+      await updateJobStatus(jobId, "PROCESSING");
 
-      // 2️⃣ STREAM FILE
+      // 3️⃣ STREAM FILE
       const fileStream = await minioClient.getObject(
         process.env.MINIO_BUCKET!,
         filePath
       );
 
-      // 3️⃣ PREPARE FORM
+      // 4️⃣ CALL OCR SERVICE
       const form = new FormData();
-      form.append("file", fileStream, {
-        filename: filePath.split("/").pop() || "invoice.pdf",
-      });
+      form.append("file", fileStream, { filename: "invoice.pdf" });
       form.append("business_id", businessId);
       form.append("job_id", jobId);
 
-      // 4️⃣ SEND TO PYTHON
       jobLogger.info({ msg: "Sending to Python Service", url: OCR_SERVICE_URL });
       
       const response = await axios.post(OCR_SERVICE_URL, form, {
-        headers: {
-          ...form.getHeaders(),
-        },
+        headers: { ...form.getHeaders() },
         timeout: 60000, 
         maxContentLength: Infinity,
         maxBodyLength: Infinity,
-      } as any);
+      });
 
-      const ocrResult = response.data as { status: string; message?: string; data: any };
-      
-      if (ocrResult.status !== "success") {
-        throw new Error(ocrResult.message || "OCR Service returned failure");
+      if (response.data.status !== "success") {
+        throw new Error(response.data.message || "OCR Service returned failure");
       }
 
-      jobLogger.info("✅ OCR COMPLETED SUCCESSFULLY");
+      jobLogger.info("✅ OCR Success");
 
-      // 5️⃣ SAVE RESULTS
+      // 5️⃣ SAVE RESULTS (Atomic-ish)
       const versionId = uuid();
-      const { data: rawData } = ocrResult;
+      const ocrData = response.data.data;
 
-      const { error: versionError } = await supabase
+      // Insert Version
+      const { error: dbError } = await supabase
         .from("invoice_versions")
         .insert({
           id: versionId,
           invoice_id: invoiceId,
-          version_number: 1,
-          data_snapshot: rawData,
-          raw_ocr_json: rawData,
-          confidence: 0.95,
+          version_number: 1, // Logic for incrementing version number should be better in future
+          data_snapshot: ocrData,
+          raw_ocr_json: ocrData,
+          confidence: 0.95, // Python should return this ideally
           created_by: "system",
         });
 
-      if (versionError) {
-        jobLogger.error({ msg: "Version insert error", err: versionError });
-        throw new Error(`DB Insert Error: ${versionError.message}`);
-      }
+      if (dbError) throw new Error(`DB Insert Error: ${dbError.message}`);
 
-      // 6️⃣ UPDATE JOB & INVOICE
-      await supabase
-        .from("invoice_ocr_jobs")
-        .update({ status: "COMPLETED" })
-        .eq("id", jobId);
+      // 6️⃣ MARK COMPLETED
+      await updateJobStatus(jobId, "COMPLETED");
 
+      // Update Invoice Status
       await supabase
         .from("invoices")
         .update({ status: "NEEDS_REVIEW" })
         .eq("id", invoiceId);
 
-      endTimer({ status: "success" }); // ✅ Record Success Duration
+      endTimer({ status: "success" });
       jobLogger.info("🎉 JOB FINISHED");
 
     } catch (err: any) {
-      endTimer({ status: "failed" }); // ✅ Record Failure Duration
-      ocrJobFailuresTotal.inc({ error_type: err.code || "unknown" }); // ✅ Record Failure Count
+      endTimer({ status: "failed" });
+      ocrJobFailuresTotal.inc({ error_type: err.code || "unknown" });
       
       jobLogger.error({ msg: "Job Failed", err: err.message });
 
-      // UPDATE STATUS: FAILED
-      await supabase
-        .from("invoice_ocr_jobs")
-        .update({ status: "FAILED", error_message: err.message })
-        .eq("id", jobId);
-        
-      throw err; 
+      // 7️⃣ HANDLE FAILURE
+      // We mark as FAILED in DB to reflect current state.
+      // BullMQ will see the thrown error and schedule a retry if configured.
+      // If it retries, step 2 will set it back to PROCESSING.
+      await updateJobStatus(jobId, "FAILED", err.message);
+
+      throw err; // REQUIRED for BullMQ to know it failed
     }
   },
   {
