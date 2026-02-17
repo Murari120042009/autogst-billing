@@ -1,11 +1,10 @@
 import React, { useState } from 'react';
-import axios from 'axios';
 
 /**
- * Production-Ready Direct Upload Component
+ * Production-Ready Direct Upload Component (Native Fetch)
  * 
- * Uses presigned URLs to upload files directly to MinIO,
- * bypassing Vercel's 4.5MB limit and 10s timeout.
+ * Zero dependencies - uses native fetch API
+ * Works on Vercel without any package.json changes
  */
 
 interface UploadResponse {
@@ -59,25 +58,33 @@ const DirectUpload: React.FC = () => {
             // ========================================
             setStatus('🔐 Requesting upload permission...');
 
-            const token = localStorage.getItem('authToken'); // Adjust based on your auth implementation
+            const token = localStorage.getItem('authToken');
             if (!token) {
                 throw new Error('Not authenticated');
             }
 
-            const { data: presignData } = await axios.post(
-                `${process.env.REACT_APP_API_URL}/api/upload-direct/presigned`,
+            const presignResponse = await fetch(
+                `${process.env.NEXT_PUBLIC_API_URL}/api/upload-direct/presigned`,
                 {
-                    filename: file.name,
-                    mimetype: file.type,
-                    size: file.size // ⚠️ REQUIRED for backend validation
-                },
-                {
+                    method: 'POST',
                     headers: {
                         'Authorization': `Bearer ${token}`,
                         'Content-Type': 'application/json'
-                    }
+                    },
+                    body: JSON.stringify({
+                        filename: file.name,
+                        mimetype: file.type,
+                        size: file.size
+                    })
                 }
             );
+
+            if (!presignResponse.ok) {
+                const error = await presignResponse.json();
+                throw new Error(error.error || `HTTP ${presignResponse.status}`);
+            }
+
+            const presignData = await presignResponse.json();
 
             console.log('Presigned URL received:', {
                 fileId: presignData.fileId,
@@ -89,44 +96,54 @@ const DirectUpload: React.FC = () => {
             // ========================================
             setStatus('📤 Uploading to storage...');
 
-            // ⚠️ CRITICAL: Do NOT send Authorization header to MinIO
-            // The presigned URL already contains authentication
-            await axios.put(presignData.url, file, {
+            // Note: Native fetch doesn't support progress tracking for uploads
+            // For progress, you'd need to use XMLHttpRequest or a library
+            // This is a trade-off for zero dependencies
+
+            const uploadResponse = await fetch(presignData.url, {
+                method: 'PUT',
                 headers: {
-                    'Content-Type': file.type // Must match the file's actual type
+                    'Content-Type': file.type
                 },
-                onUploadProgress: (progressEvent) => {
-                    const percentCompleted = Math.round(
-                        (progressEvent.loaded * 100) / (progressEvent.total || 1)
-                    );
-                    setProgress(percentCompleted);
-                    setStatus(`📤 Uploading: ${percentCompleted}%`);
-                }
+                body: file
             });
 
+            if (!uploadResponse.ok) {
+                throw new Error(`Upload failed: HTTP ${uploadResponse.status}`);
+            }
+
             console.log('File uploaded to storage successfully');
+            setProgress(66); // Simulated progress
 
             // ========================================
             // STEP 3: Notify Backend to Process
             // ========================================
             setStatus('🔔 Notifying server...');
 
-            const { data: result }: { data: UploadResponse } = await axios.post(
-                `${process.env.REACT_APP_API_URL}/api/upload-direct/notify`,
+            const notifyResponse = await fetch(
+                `${process.env.NEXT_PUBLIC_API_URL}/api/upload-direct/notify`,
                 {
-                    objectName: presignData.objectName,
-                    fileId: presignData.fileId,
-                    filename: file.name,
-                    mimetype: file.type,
-                    size: file.size
-                },
-                {
+                    method: 'POST',
                     headers: {
                         'Authorization': `Bearer ${token}`,
                         'Content-Type': 'application/json'
-                    }
+                    },
+                    body: JSON.stringify({
+                        objectName: presignData.objectName,
+                        fileId: presignData.fileId,
+                        filename: file.name,
+                        mimetype: file.type,
+                        size: file.size
+                    })
                 }
             );
+
+            if (!notifyResponse.ok) {
+                const error = await notifyResponse.json();
+                throw new Error(error.error || `HTTP ${notifyResponse.status}`);
+            }
+
+            const result: UploadResponse = await notifyResponse.json();
 
             console.log('Upload complete:', result.data);
 
@@ -134,40 +151,29 @@ const DirectUpload: React.FC = () => {
             setProgress(100);
 
             // Optional: Redirect or update UI
-            // navigate(`/invoices/${result.data.invoiceId}`);
+            // router.push(`/invoices/${result.data.invoiceId}`);
 
         } catch (error: any) {
             console.error('Upload failed:', error);
 
-            // Handle specific error cases
-            if (error.response) {
-                const status = error.response.status;
-                const message = error.response.data?.error || 'Unknown error';
+            // Parse error message
+            const errorMessage = error.message || 'Unknown error';
 
-                switch (status) {
-                    case 401:
-                        setStatus('❌ Authentication failed. Please log in again.');
-                        break;
-                    case 403:
-                        setStatus('❌ Unauthorized. You do not have permission to upload this file.');
-                        break;
-                    case 404:
-                        setStatus('❌ File not found in storage. Please try again.');
-                        break;
-                    case 413:
-                        setStatus('❌ File too large. Maximum size is 50MB.');
-                        break;
-                    case 500:
-                        setStatus('❌ Server error. Please try again later.');
-                        break;
-                    default:
-                        setStatus(`❌ Upload failed: ${message}`);
-                }
-            } else if (error.request) {
-                // Network error
+            // Handle specific error cases
+            if (errorMessage.includes('401') || errorMessage.includes('Not authenticated')) {
+                setStatus('❌ Authentication failed. Please log in again.');
+            } else if (errorMessage.includes('403') || errorMessage.includes('Unauthorized')) {
+                setStatus('❌ Unauthorized. You do not have permission to upload this file.');
+            } else if (errorMessage.includes('404')) {
+                setStatus('❌ File not found in storage. Please try again.');
+            } else if (errorMessage.includes('413')) {
+                setStatus('❌ File too large. Maximum size is 50MB.');
+            } else if (errorMessage.includes('500')) {
+                setStatus('❌ Server error. Please try again later.');
+            } else if (errorMessage.includes('NetworkError') || errorMessage.includes('Failed to fetch')) {
                 setStatus('❌ Network error. Please check your connection.');
             } else {
-                setStatus(`❌ Error: ${error.message}`);
+                setStatus(`❌ Upload failed: ${errorMessage}`);
             }
 
             setProgress(0);
@@ -177,52 +183,64 @@ const DirectUpload: React.FC = () => {
     };
 
     return (
-        <div className="upload-container">
-            <h2>Upload Invoice</h2>
+        <div className="max-w-2xl mx-auto p-6 bg-white rounded-lg shadow-md">
+            <h2 className="text-2xl font-bold mb-6">Upload Invoice</h2>
 
-            <div className="file-input-wrapper">
+            <div className="mb-4">
                 <input
                     type="file"
                     accept=".pdf,.jpg,.jpeg,.png"
                     onChange={handleFileChange}
                     disabled={uploading}
+                    className="block w-full text-sm text-gray-500
+            file:mr-4 file:py-2 file:px-4
+            file:rounded-md file:border-0
+            file:text-sm file:font-semibold
+            file:bg-blue-50 file:text-blue-700
+            hover:file:bg-blue-100
+            disabled:opacity-50 disabled:cursor-not-allowed"
                 />
             </div>
 
             {file && (
-                <div className="file-info">
-                    <p><strong>Selected:</strong> {file.name}</p>
-                    <p><strong>Size:</strong> {(file.size / 1024 / 1024).toFixed(2)} MB</p>
-                    <p><strong>Type:</strong> {file.type}</p>
+                <div className="mb-4 p-4 bg-gray-50 rounded-md">
+                    <p className="text-sm"><strong>Selected:</strong> {file.name}</p>
+                    <p className="text-sm"><strong>Size:</strong> {(file.size / 1024 / 1024).toFixed(2)} MB</p>
+                    <p className="text-sm"><strong>Type:</strong> {file.type}</p>
                 </div>
             )}
 
             <button
                 onClick={handleUpload}
                 disabled={!file || uploading}
-                className="upload-button"
+                className="w-full bg-blue-600 text-white py-3 px-6 rounded-md
+          font-semibold hover:bg-blue-700 disabled:bg-gray-300
+          disabled:cursor-not-allowed transition-colors"
             >
                 {uploading ? 'Uploading...' : 'Upload Invoice'}
             </button>
 
             {progress > 0 && (
-                <div className="progress-bar">
+                <div className="mt-4 w-full bg-gray-200 rounded-full h-2.5">
                     <div
-                        className="progress-fill"
+                        className="bg-blue-600 h-2.5 rounded-full transition-all duration-300"
                         style={{ width: `${progress}%` }}
                     />
                 </div>
             )}
 
             {status && (
-                <div className={`status-message ${status.startsWith('❌') ? 'error' : 'success'}`}>
+                <div className={`mt-4 p-4 rounded-md ${status.startsWith('❌')
+                        ? 'bg-red-50 text-red-800 border border-red-200'
+                        : 'bg-green-50 text-green-800 border border-green-200'
+                    }`}>
                     {status}
                 </div>
             )}
 
-            <div className="upload-notes">
-                <h3>Upload Guidelines:</h3>
-                <ul>
+            <div className="mt-6 p-4 bg-blue-50 rounded-md">
+                <h3 className="font-semibold mb-2">Upload Guidelines:</h3>
+                <ul className="text-sm space-y-1 list-disc list-inside">
                     <li>Maximum file size: 50MB</li>
                     <li>Supported formats: PDF, JPEG, PNG</li>
                     <li>Files are processed automatically after upload</li>
@@ -236,83 +254,48 @@ const DirectUpload: React.FC = () => {
 export default DirectUpload;
 
 /* ========================================
-   BASIC CSS (Add to your stylesheet)
+   OPTIONAL: Progress Tracking with XMLHttpRequest
+   
+   If you need real upload progress, use this helper:
    ======================================== */
 
 /*
-.upload-container {
-  max-width: 600px;
-  margin: 2rem auto;
-  padding: 2rem;
-  border: 1px solid #ddd;
-  border-radius: 8px;
+function uploadWithProgress(
+  url: string,
+  file: File,
+  onProgress: (percent: number) => void
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable) {
+        const percent = Math.round((e.loaded * 100) / e.total);
+        onProgress(percent);
+      }
+    });
+
+    xhr.addEventListener('load', () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve();
+      } else {
+        reject(new Error(`Upload failed: HTTP ${xhr.status}`));
+      }
+    });
+
+    xhr.addEventListener('error', () => {
+      reject(new Error('Network error'));
+    });
+
+    xhr.open('PUT', url);
+    xhr.setRequestHeader('Content-Type', file.type);
+    xhr.send(file);
+  });
 }
 
-.file-input-wrapper {
-  margin: 1rem 0;
-}
-
-.file-info {
-  background: #f5f5f5;
-  padding: 1rem;
-  border-radius: 4px;
-  margin: 1rem 0;
-}
-
-.upload-button {
-  background: #007bff;
-  color: white;
-  padding: 0.75rem 2rem;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 1rem;
-}
-
-.upload-button:disabled {
-  background: #ccc;
-  cursor: not-allowed;
-}
-
-.progress-bar {
-  width: 100%;
-  height: 20px;
-  background: #f0f0f0;
-  border-radius: 10px;
-  margin: 1rem 0;
-  overflow: hidden;
-}
-
-.progress-fill {
-  height: 100%;
-  background: #28a745;
-  transition: width 0.3s ease;
-}
-
-.status-message {
-  padding: 1rem;
-  margin: 1rem 0;
-  border-radius: 4px;
-}
-
-.status-message.success {
-  background: #d4edda;
-  color: #155724;
-}
-
-.status-message.error {
-  background: #f8d7da;
-  color: #721c24;
-}
-
-.upload-notes {
-  margin-top: 2rem;
-  padding-top: 1rem;
-  border-top: 1px solid #ddd;
-}
-
-.upload-notes ul {
-  list-style-type: disc;
-  padding-left: 1.5rem;
-}
+// Usage in STEP 2:
+await uploadWithProgress(presignData.url, file, (percent) => {
+  setProgress(percent);
+  setStatus(`📤 Uploading: ${percent}%`);
+});
 */
