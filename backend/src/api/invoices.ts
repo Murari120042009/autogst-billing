@@ -1,6 +1,6 @@
 import express from "express";
 import { createClient } from "@supabase/supabase-js";
-import { requirePermission } from "../middleware/requirePermission";
+import { authenticateUser } from "../middleware/authMiddleware";
 
 const router = express.Router();
 
@@ -15,14 +15,15 @@ const supabase = createClient(
  */
 router.get(
   "/",
-  requirePermission("invoice.view"),
+  authenticateUser,
   async (req, res) => {
     try {
-      const businessId = req.headers["x-business-id"];
+      const user = req.user!;
+      const { businessId } = user;
 
       if (!businessId) {
-        return res.status(400).json({
-          error: "Missing x-business-id header"
+        return res.status(403).json({
+          error: "User is not associated with a business context"
         });
       }
 
@@ -50,11 +51,27 @@ router.get(
  */
 router.get(
   "/:invoiceId",
-  requirePermission("invoice.view"),
+  authenticateUser,
   async (req, res) => {
     try {
       const { invoiceId } = req.params;
+      const { businessId } = req.user!;
 
+      // 1. Verify Ownership
+      const { data: invoice, error: invoiceError } = await supabase
+        .from("invoices")
+        .select("id")
+        .eq("id", invoiceId)
+        .eq("business_id", businessId)
+        .single();
+
+      if (invoiceError || !invoice) {
+        return res.status(404).json({
+          error: "Invoice not found or access denied" // Security: Ambiguous error message
+        });
+      }
+
+      // 2. Fetch Version Data
       const { data, error } = await supabase
         .from("invoice_versions")
         .select("version_number, data_snapshot, created_at")
@@ -65,7 +82,7 @@ router.get(
 
       if (error || !data) {
         return res.status(404).json({
-          error: "Invoice not found"
+          error: "Invoice version data not found"
         });
       }
 

@@ -78,10 +78,23 @@ const valid = await verifyOtp(otp, data.otp_hash);
     return res.status(400).json({ error: "Invalid OTP" });
   }
 
-  await supabase
+  // 3️⃣ ATOMIC UPDATER (Replaces simple update)
+  const { data: updatedRows, error: updateError } = await supabase
     .from("otps")
     .update({ consumed: true })
-    .eq("id", data.id);
+    .eq("id", data.id)
+    .eq("consumed", false) // 🛡️ CRITICAL: Atomic Check-and-Set
+    .select();
+
+  if (updateError) {
+    console.error("OTP UPDATE ERROR", updateError);
+    return res.status(500).json({ error: "Verification failed" });
+  }
+
+  if (!updatedRows || updatedRows.length === 0) {
+    console.warn(`OTP REPLAY ATTACK BLOCKED: ${email}`);
+    return res.status(400).json({ error: "OTP already used" });
+  }
 
   res.json({ message: "OTP verified" });
 });
