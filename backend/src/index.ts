@@ -7,7 +7,8 @@ import cors from "cors";
 import emailOtpRouter from "./api/emailOtp";
 import uploadRouter from "./api/upload";
 import uploadInvoiceRoute from "./routes/uploadInvoiceRoute";
-import invoiceCorrectionRouter from "./api/invoiceCorrection"; // ✅ ADD THIS
+import directUploadRouter from "./api/directUpload"; 
+import invoiceCorrectionRouter from "./api/invoiceCorrection";
 import invoiceFinalizeRouter from "./api/invoiceFinalize";
 import exportRouter from "./api/exports";
 import exportFreezeRouter from "./api/exportFreeze";
@@ -67,53 +68,13 @@ app.get("/", (_req, res) => {
 app.use("/api/email-otp", emailOtpRouter);
 app.use("/api/upload", uploadRouter);
 app.use("/api/upload-invoice", uploadInvoiceRoute);
-
-// ✅ ONLY REQUIRED ADDITION
-app.use("/api/invoices", invoiceCorrectionRouter);
-
-// ✅ HEALTH CHECKS
-app.get("/health", (req, res) => {
-  res.status(200).json({ status: "ok", uptime: process.uptime() });
-});
-
-app.get("/ready", (req, res) => {
-  // Check Redis/DB connection status ideally
-  // For MVP, if we are running, we are "ready" unless we add deep checks
-  res.status(200).json({ status: "ready" });
-});
-
-// Export app for testing
-export { app };
-
-const PORT = Number(process.env.PORT) || 4000;
-
-let server: any;
-
-if (process.env.NODE_ENV !== 'test') {
-  server = app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on port ${PORT}`);
-  });
-}
-
-// ✅ GRACEFUL SHUTDOWN
-const gracefulShutdown = (signal: string) => {
-  logger.info(`Received ${signal}. Closing HTTP server...`);
-  server.close(() => {
-    logger.info("HTTP server closed.");
-    // Close DB/Redis connections here if explicit cleanup needed
-    process.exit(0);
-  });
-};
-
-process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
-process.on("SIGINT", () => gracefulShutdown("SIGINT"));
-app.use("/api/invoices", invoiceFinalizeRouter);
+app.use("/api/upload-direct", directUploadRouter); // ✅ NEW DIRECT UPLOAD
+app.use("/api/invoices", invoiceCorrectionRouter); // ✅ Fixes, edits
+app.use("/api/invoices", invoiceFinalizeRouter);   // ✅ Finalization
+app.use("/api/invoices", invoicesRouter);          // ✅ Listing/Fetching
 app.use("/api/exports", exportRouter);
 app.use("/api/exports", exportFreezeRouter);
-
 app.use("/api/reports", reportsRouter);
-
 app.use("/api/dashboard", dashboardRouter);
-app.use("/api/audit", auditRouter)
-app.use("/api/invoices", invoicesRouter);
-app.use("/api/jobs", jobsRouter); // ✅ ADD THIS
+app.use("/api/audit", auditRouter);
+app.use("/api/jobs", jobsRouter);
